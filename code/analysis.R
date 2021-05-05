@@ -199,17 +199,22 @@ surv_vimp2 = surv_vimp %>%
 ################################################################################
 #----------------------------- REVISION INTERVALS -----------------------------#
 
-# 1) Calculate revision intervals
-# 2) Merge with constitution data
-# 3) Principal component analysis
-# 4) Train random survival forests
+# 1) Reshape longitudinal constitutional chronology data into event-level
+#    data of revisions, calculate statistics, and classify amendments as 
+#    significant or not
+# 2) Filter to significant revisions and calculate durations
+# 3) Bring in constituional design data and impute missing values
+# 4) Principal component analysis
+# 5) Split data and prepare for models
+# 6) Run random forests and Cox model
+# 7) Cross-validate to compare accuracy
 
 ################################################################################
 
 
 #----- (1) REVISION INTERVALS -----#
 
-# Revisions
+# Revisions [tidyverse]
 rev = chron %>% ungroup() %>%
   
   # Recode events
@@ -241,19 +246,27 @@ rev = chron %>% ungroup() %>%
   select(code, year, const, const_age=age, type:num_amends)
 
 
-# Significant revisions
+#----- (2) FINAL REVISIONS DATA -----#
+
+# Significant revisions [tidyverse]
 sigrev = rev %>% ungroup() %>% group_by(code) %>%
+  
+  # Filter to new constitutions and significant amendments
   filter(type != "amendment") %>%
+  
+  # Calculate duration since last event
   mutate(dur = year - lag(year),
          type = ifelse(type=="non", 0, ifelse(type=="sig", 1, 2))) %>%
+  
+  # Organize dataset
   filter(!is.na(dur)) %>%
   select(code:const, dur, type, avg_dur, const_age, state_age, 
          num_const, num_amends)
 
 
-#----- (2) CONSTITUTION DATA -----#
+#----- (3) CONSTITUTION DATA -----#
 
-# Merge data on constitutional events and characteristics
+# Merge data on constitutional events and characteristics [tidyverse]
 sr = sigrev %>%
   merge(cnc_wide, by=c("code", "year", "const")) %>% # merge data
   
@@ -262,10 +275,6 @@ sr = sigrev %>%
   select(which(apply(., 2, var, na.rm=TRUE) != 0), type) %>% # remove constants
   select(code:dur, type, everything(), -age, -failure)
 
-# Merge data with EGM replication data
-sr_egm = sigrev %>%
-  merge(select(surv_imp, !year:failure), by=c("code", "const"))
-
 # Impute missing data [randomForestSRC]
 sr_imp = cbind(select(sr, code:const),
                impute.rfsrc(Surv(dur ~ type) ~ ., # formula
@@ -273,44 +282,76 @@ sr_imp = cbind(select(sr, code:const),
                             nsplit=3))  # hyperparameters
 
 
-#----- (3) DIMENSION REDUCTION -----#
+#----- (4) DIMENSION REDUCTION -----#
 
-# Principal component analysis
+# Principal component analysis [stats]
 pca = select(sr_imp, !code:type) %>%
   prcomp(scale=TRUE, rank=25)
 
-# Store component scores and add environmental data
+# Store component scores and add environmental data [tidyverse]
 sr_pc = cbind(select(sr, code:type), predict(pca)) %>%
   merge(enviro, by=c("code", "year"), all.x=TRUE)
 
+# Also store EGM design variables for comparison [tidyverse]
+sr_egm = sigrev %>%
+  merge(select(surv_imp, !year:failure), by=c("code", "const"))
 
-#----- (4) RANDOM FORESTS -----#
+
+#----- (5) PREPARE DATA -----#
+
+# Remove ID cols [tidyverse]
+sr_data_pca = select(sr_pc, !code:const) %>% mutate(type = ifelse(type>0, 1, 0))
+sr_data_egm = select(sr_egm, !code:year) %>% mutate(type = ifelse(type>0, 1, 0))
+sr_data_cox = sr_egm_data
 
 # Sample indices to split data
-n = nrow(sr_pc) # sample size
+n1 = nrow(sr_data_pca) # sample size
+n2 = nrow(sr_data_egm) # sample size
 p = 0.7 # proportion to put in training data
 set.seed(1000) # set seed for random sample
-train = sample(n, p*n) # randomly select cases for training data
+train1 = sample(n1, p*n1) # randomly select cases for training data
+train2 = sample(n2, p*n2) # randomly select cases for training data
 
-# Remove ID cols
-sr_rf_data = select(sr_pc, !code:const)
-sr_egm_data = select(sr_egm, !code:year)
-sr_cox_data = mutate(sr_egm_data, type = ifelse(type>0, 1, 0))
+# Formulas
+Y = "Surv(dur, type) ~"
+X_cox = paste(names(sr_data_cox)[3:ncol(sr_data_cox)], collapse=" + ")
+X_egm = paste(names(sr_data_egm)[3:ncol(sr_data_egm)], collapse=" + ")
+X_pca = paste(names(sr_data_pca)[3:ncol(sr_data_pca)], collapse=" + ")
+form_cox = as.formula(paste(Y, X_cox))
+form_egm = as.formula(paste(Y, X_egm))
+form_pca = as.formula(paste(Y, X_cox))
 
-# Train forests
+
+#----- (6) RANDOM FORESTS and MODELS -----#
+
+# Run Cox model as baseline [survival]
 cox_sr = coxph(Surv(dur, type) ~., x=TRUE,  # formula
-               data=sr_cox_data[train,]) # data
+               data=sr_data_cox[train2,]) # data
+
+# Train random forests on original 9 design variables [randomForestSRC]
 rf_sr_egm = rfsrc(Surv(dur, type) ~., # formula
-                  data = sr_egm_data[train,]) # data
-rf_sr = rfsrc(Surv(dur, type) ~., # formula
-              data = sr_rf_data[train,], # data
-              na.action = "na.impute") # impute missing data
+                  data = sr_data_egm[train2,]) # data
+
+# Train random forests on PCA data [randomForestSRC]
+rf_sr_pca = rfsrc(Surv(dur, type) ~., # formula
+                  data = sr_data_pca[train1,], # data
+                  na.action = "na.impute") # impute missing data
+
+
+#----- (7) CROSS-VALIDATION -----#
+
+# Get error rates
+err_egm = last(predict(rf_sr_egm, newdata=sr_data_egm[-train2,])$err.rate)
+err_pca = last(predict(rf_sr_pca, newdata=sr_data_pca[-train1,])$err.rate)
+errs = data.frame(mod = c("RF (EGM data)", "RF (PCA data)"),
+                  err = c(err_egm, err_pca),
+                  acc = 1-err)
 
 # Bootstrap cross-validation on constitutional survival models [pec]
-c_sr1 = cindex(list(`Cox`=cox_sr), formula = Surv(dur, type)~1, 
-               data = sr_cox_data[-train,], splitMethod="BootCv", B=10)
-c_sr2 = cindex(list(`RF (Original)`=rf_sr_egm), formula = Surv(dur, failure)~1, 
-               data = sr_egm_data[-train,], splitMethod="BootCv", B=10)
-c_sr3 = cindex(list(`RF (PCA)`=rf_sr), formula = Surv(dur, failure)~1, 
-               data = sr_rf_data[-train,], splitMethod="BootCv", B=10)
+c_sr1 = cindex(cox_sr, formula = Surv(dur, type)~1,
+               data = sr_data_cox[-train2,], splitMethod="BootCv", B=10)
+c_sr2 = cindex(list(`RF (EGM)`=rf_sr_egm), formula = Surv(dur, type)~1, 
+               data = sr_data_egm[-train2,], splitMethod="BootCv", B=10)
+c_sr3 = cindex(list(`RF (PCA)`=rf_sr_pca), formula = Surv(dur, type)~1, 
+               data = sr_data_pca[-train1,], splitMethod="BootCv", B=10)
 
