@@ -2,7 +2,7 @@
 
 **Draft of article**
 - Online version: [View](http://nmorse.info/research/constitutions/)
-- PDF version: `morse-const.pdf` (not uploaded yet)
+- PDF version: `morse-const.pdf`
 - Exploratory data: [View](https://nmorse.shinyapps.io/const/)
 
 **Replication code**
