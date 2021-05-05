@@ -2,8 +2,8 @@
 
 **Draft of article**
 - Online version: [View](http://nmorse.info/research/constitutions/)
-- PDF version: `morse-const.pdf`
-- Online webapp with exploratory data: [View](https://nmorse.shinyapps.io/const/)
+- PDF version: `morse-const.pdf` (not uploaded yet)
+- Exploratory data: [View](https://nmorse.shinyapps.io/const/)
 
 **Replication code**
 - `code/data-const.R`: data preparation of constitution data
